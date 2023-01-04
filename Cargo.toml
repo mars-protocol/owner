@@ -1,0 +1,15 @@
+[package]
+name       = "mars-owner"
+version    = "1.0.0"
+authors    = ["grod220 <gabe.r@delphilabs.io>", "Piotr Babel <piotr@delphilabs.io>"]
+edition    = "2021"
+repository = "https://github.com/mars-protocol/owner"
+homepage   = "https://marsprotocol.io"
+keywords   = ["mars", "cosmos", "cosmwasm"]
+
+[dependencies]
+cosmwasm-schema = "1.1.9"
+cosmwasm-std    = "1.1.9"
+cw-storage-plus = "1.0.1"
+schemars        = "0.8.11"
+thiserror       = "1.0.37"
