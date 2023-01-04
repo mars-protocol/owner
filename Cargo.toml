@@ -1,11 +1,13 @@
 [package]
-name       = "mars-owner"
-version    = "1.0.0"
-authors    = ["grod220 <gabe.r@delphilabs.io>", "Piotr Babel <piotr@delphilabs.io>"]
-edition    = "2021"
-repository = "https://github.com/mars-protocol/owner"
-homepage   = "https://marsprotocol.io"
-keywords   = ["mars", "cosmos", "cosmwasm"]
+name        = "mars-owner"
+version     = "1.0.0"
+authors     = ["grod220 <gabe.r@delphilabs.io>", "Piotr Babel <piotr@delphilabs.io>"]
+description = "A package for managing owner role in cosmwasm contracts"
+license     = "GPL-3.0"
+edition     = "2021"
+repository  = "https://github.com/mars-protocol/owner"
+homepage    = "https://marsprotocol.io"
+keywords    = ["mars", "cosmos", "cosmwasm"]
 
 [dependencies]
 cosmwasm-schema = "1.1.9"
