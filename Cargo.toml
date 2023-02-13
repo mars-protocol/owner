@@ -9,6 +9,10 @@ repository  = "https://github.com/mars-protocol/owner"
 homepage    = "https://marsprotocol.io"
 keywords    = ["mars", "cosmos", "cosmwasm"]
 
+[features]
+default = []
+emergency-owner = []
+
 [dependencies]
 cosmwasm-schema = "1.1.9"
 cosmwasm-std    = "1.1.9"
