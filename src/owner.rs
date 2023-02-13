@@ -13,6 +13,7 @@ use thiserror::Error;
 pub struct OwnerResponse {
     pub owner: Option<String>,
     pub proposed: Option<String>,
+    pub emergency_owner: Option<String>,
     pub initialized: bool,
     pub abolished: bool,
 }
@@ -28,6 +29,9 @@ pub enum OwnerError {
 
     #[error("Caller is not the proposed owner")]
     NotProposedOwner {},
+
+    #[error("Caller is not the emergency owner")]
+    NotEmergencyOwner {},
 
     #[error("Owner state transition was not valid")]
     StateTransitionError {},
@@ -51,6 +55,7 @@ impl OwnerUninitialized {
     pub fn initialize(&self, owner: &Addr) -> OwnerState {
         OwnerState::B(OwnerSetNoneProposed {
             owner: owner.clone(),
+            emergency_owner: None,
         })
     }
 
@@ -62,6 +67,7 @@ impl OwnerUninitialized {
 #[cw_serde]
 struct OwnerSetNoneProposed {
     owner: Addr,
+    emergency_owner: Option<Addr>,
 }
 
 impl OwnerSetNoneProposed {
@@ -69,11 +75,19 @@ impl OwnerSetNoneProposed {
         OwnerState::C(OwnerSetWithProposed {
             owner: self.owner,
             proposed: proposed.clone(),
+            emergency_owner: self.emergency_owner,
         })
     }
 
     pub fn abolish_owner_role(self) -> OwnerState {
         OwnerState::D(OwnerRoleAbolished)
+    }
+
+    pub fn set_emergency_owner(self, emergency_owner: Option<Addr>) -> OwnerState {
+        OwnerState::B(OwnerSetNoneProposed {
+            owner: self.owner,
+            emergency_owner,
+        })
     }
 }
 
@@ -81,16 +95,21 @@ impl OwnerSetNoneProposed {
 struct OwnerSetWithProposed {
     owner: Addr,
     proposed: Addr,
+    emergency_owner: Option<Addr>,
 }
 
 impl OwnerSetWithProposed {
     pub fn clear_proposed(self) -> OwnerState {
-        OwnerState::B(OwnerSetNoneProposed { owner: self.owner })
+        OwnerState::B(OwnerSetNoneProposed {
+            owner: self.owner,
+            emergency_owner: self.emergency_owner,
+        })
     }
 
     pub fn accept_proposed(self) -> OwnerState {
         OwnerState::B(OwnerSetNoneProposed {
             owner: self.proposed,
+            emergency_owner: self.emergency_owner,
         })
     }
 
@@ -112,6 +131,10 @@ pub enum OwnerUpdate {
     AcceptProposed,
     /// Throws away the keys to the Owner role forever. Once done, no owner can ever be set later.
     AbolishOwnerRole,
+    /// A separate entity managed by Owner that can be used for granting specific emergency powers.
+    SetEmergencyOwner { emergency_owner: String },
+    /// Remove the entity in the Emergency Owner role
+    ClearEmergencyOwner,
 }
 
 #[cw_serde]
@@ -130,6 +153,8 @@ pub enum OwnerInit {
 ///     - Once owner is set. Only they can execute the following updates:
 ///       - ProposeNewOwner
 ///       - ClearProposed
+///       - SetEmergencyOwner
+///       - ClearEmergencyOwner
 /// State C: OwnerSetWithProposed
 ///     - Only the proposed new owner can accept the new role via AcceptProposed {}
 ///     - The current owner can also clear the proposed new owner via ClearProposed {}
@@ -201,10 +226,26 @@ impl<'a> Owner<'a> {
         }
     }
 
+    pub fn emergency_owner(&self, storage: &'a dyn Storage) -> StdResult<Option<Addr>> {
+        Ok(match self.state(storage)? {
+            OwnerState::B(c) => c.emergency_owner,
+            OwnerState::C(c) => c.emergency_owner,
+            _ => None,
+        })
+    }
+
+    pub fn is_emergency_owner(&self, storage: &'a dyn Storage, addr: &Addr) -> StdResult<bool> {
+        match self.emergency_owner(storage)? {
+            Some(em_owner) if &em_owner == addr => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
     pub fn query(&self, storage: &'a dyn Storage) -> StdResult<OwnerResponse> {
         Ok(OwnerResponse {
             owner: self.current(storage)?.map(Into::into),
             proposed: self.proposed(storage)?.map(Into::into),
+            emergency_owner: self.emergency_owner(storage)?.map(Into::into),
             initialized: !matches!(self.state(storage)?, OwnerState::A(OwnerUninitialized)),
             abolished: matches!(self.state(storage)?, OwnerState::D(OwnerRoleAbolished)),
         })
@@ -274,9 +315,18 @@ impl<'a> Owner<'a> {
 
         let new_state = match (state, event) {
             (OwnerState::B(b), OwnerUpdate::ProposeNewOwner { proposed }) => {
-                let validated = api.addr_validate(&proposed)?;
                 self.assert_owner(storage, sender)?;
+                let validated = api.addr_validate(&proposed)?;
                 b.propose(&validated)
+            }
+            (OwnerState::B(b), OwnerUpdate::SetEmergencyOwner { emergency_owner }) => {
+                self.assert_owner(storage, sender)?;
+                let validated = api.addr_validate(&emergency_owner)?;
+                b.set_emergency_owner(Some(validated))
+            }
+            (OwnerState::B(b), OwnerUpdate::ClearEmergencyOwner) => {
+                self.assert_owner(storage, sender)?;
+                b.set_emergency_owner(None)
             }
             (OwnerState::B(b), OwnerUpdate::AbolishOwnerRole) => {
                 self.assert_owner(storage, sender)?;
@@ -318,6 +368,18 @@ impl<'a> Owner<'a> {
             Ok(())
         }
     }
+
+    pub fn assert_emergency_owner(
+        &self,
+        storage: &'a dyn Storage,
+        caller: &Addr,
+    ) -> OwnerResult<()> {
+        if !self.is_emergency_owner(storage, caller)? {
+            Err(OwnerError::NotEmergencyOwner {})
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -328,7 +390,10 @@ mod tests {
     //--------------------------------------------------------------------------------------------------
 
     use crate::owner::OwnerState;
-    use crate::OwnerUpdate::{AbolishOwnerRole, AcceptProposed, ClearProposed, ProposeNewOwner};
+    use crate::OwnerUpdate::{
+        AbolishOwnerRole, AcceptProposed, ClearEmergencyOwner, ClearProposed, ProposeNewOwner,
+        SetEmergencyOwner,
+    };
     use crate::{Owner, OwnerError, OwnerInit, OwnerResponse};
     use cosmwasm_std::testing::{mock_dependencies, mock_info};
     use cosmwasm_std::{Addr, Empty, Storage};
@@ -362,7 +427,23 @@ mod tests {
         assert_eq!(err, OwnerError::StateTransitionError {});
 
         let err = owner
-            .update::<Empty, Empty>(deps.as_mut(), info, AbolishOwnerRole)
+            .update::<Empty, Empty>(deps.as_mut(), info.clone(), AbolishOwnerRole)
+            .unwrap_err();
+        assert_eq!(err, OwnerError::StateTransitionError {});
+
+        let err = owner
+            .update::<Empty, Empty>(
+                deps.as_mut(),
+                info.clone(),
+                SetEmergencyOwner {
+                    emergency_owner: "xyz".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, OwnerError::StateTransitionError {});
+
+        let err = owner
+            .update::<Empty, Empty>(deps.as_mut(), info, ClearEmergencyOwner)
             .unwrap_err();
         assert_eq!(err, OwnerError::StateTransitionError {});
     }
@@ -453,11 +534,27 @@ mod tests {
         let err = owner
             .update::<Empty, Empty>(
                 deps.as_mut(),
-                info,
+                info.clone(),
                 ProposeNewOwner {
                     proposed: "efg".to_string(),
                 },
             )
+            .unwrap_err();
+        assert_eq!(err, OwnerError::StateTransitionError {});
+
+        let err = owner
+            .update::<Empty, Empty>(
+                deps.as_mut(),
+                info.clone(),
+                SetEmergencyOwner {
+                    emergency_owner: "xyz".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, OwnerError::StateTransitionError {});
+
+        let err = owner
+            .update::<Empty, Empty>(deps.as_mut(), info, ClearEmergencyOwner)
             .unwrap_err();
         assert_eq!(err, OwnerError::StateTransitionError {});
     }
@@ -508,7 +605,23 @@ mod tests {
         assert_eq!(err, OwnerError::StateTransitionError {});
 
         let err = owner
-            .update::<Empty, Empty>(deps.as_mut(), info, AbolishOwnerRole)
+            .update::<Empty, Empty>(deps.as_mut(), info.clone(), AbolishOwnerRole)
+            .unwrap_err();
+        assert_eq!(err, OwnerError::StateTransitionError {});
+
+        let err = owner
+            .update::<Empty, Empty>(
+                deps.as_mut(),
+                info.clone(),
+                SetEmergencyOwner {
+                    emergency_owner: "xyz".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, OwnerError::StateTransitionError {});
+
+        let err = owner
+            .update::<Empty, Empty>(deps.as_mut(), info, ClearEmergencyOwner)
             .unwrap_err();
         assert_eq!(err, OwnerError::StateTransitionError {});
     }
@@ -672,6 +785,64 @@ mod tests {
         assert_eq!(err, OwnerError::NotOwner {})
     }
 
+    #[test]
+    fn set_emergency_owner_role_permissions() {
+        let mut deps = mock_dependencies();
+        let sender = Addr::unchecked("peter_parker");
+        let owner = Owner::new("xyz");
+
+        let mut_deps = deps.as_mut();
+        owner
+            .initialize(
+                mut_deps.storage,
+                mut_deps.api,
+                OwnerInit::SetInitialOwner {
+                    owner: sender.to_string(),
+                },
+            )
+            .unwrap();
+
+        let bad_guy = Addr::unchecked("doc_oc");
+        let info = mock_info(bad_guy.as_ref(), &[]);
+        let err = owner
+            .update::<Empty, Empty>(
+                deps.as_mut(),
+                info,
+                SetEmergencyOwner {
+                    emergency_owner: bad_guy.to_string(),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(err, OwnerError::NotOwner {})
+    }
+
+    #[test]
+    fn clear_emergency_owner_role_permissions() {
+        let mut deps = mock_dependencies();
+        let sender = Addr::unchecked("peter_parker");
+        let owner = Owner::new("xyz");
+
+        let mut_deps = deps.as_mut();
+        owner
+            .initialize(
+                mut_deps.storage,
+                mut_deps.api,
+                OwnerInit::SetInitialOwner {
+                    owner: sender.to_string(),
+                },
+            )
+            .unwrap();
+
+        let bad_guy = Addr::unchecked("doc_oc");
+        let info = mock_info(bad_guy.as_ref(), &[]);
+        let err = owner
+            .update::<Empty, Empty>(deps.as_mut(), info, ClearEmergencyOwner)
+            .unwrap_err();
+
+        assert_eq!(err, OwnerError::NotOwner {})
+    }
+
     //--------------------------------------------------------------------------------------------------
     // Test success cases
     //--------------------------------------------------------------------------------------------------
@@ -695,6 +866,7 @@ mod tests {
             OwnerResponse {
                 owner: None,
                 proposed: None,
+                emergency_owner: None,
                 initialized: false,
                 abolished: false,
             }
@@ -744,6 +916,7 @@ mod tests {
             OwnerResponse {
                 owner: Some(original_owner.to_string()),
                 proposed: None,
+                emergency_owner: None,
                 initialized: true,
                 abolished: false,
             }
@@ -801,6 +974,7 @@ mod tests {
             OwnerResponse {
                 owner: Some(original_owner.to_string()),
                 proposed: Some(proposed_owner.to_string()),
+                emergency_owner: None,
                 initialized: true,
                 abolished: false,
             }
@@ -864,6 +1038,7 @@ mod tests {
             OwnerResponse {
                 owner: Some(original_owner.to_string()),
                 proposed: None,
+                emergency_owner: None,
                 initialized: true,
                 abolished: false,
             }
@@ -928,6 +1103,7 @@ mod tests {
             OwnerResponse {
                 owner: Some(proposed_owner.to_string()),
                 proposed: None,
+                emergency_owner: None,
                 initialized: true,
                 abolished: false,
             }
@@ -979,8 +1155,153 @@ mod tests {
             OwnerResponse {
                 owner: None,
                 proposed: None,
+                emergency_owner: None,
                 initialized: true,
                 abolished: true,
+            }
+        );
+    }
+
+    #[test]
+    fn set_emergency_owner() {
+        let mut deps = mock_dependencies();
+        let original_owner = Addr::unchecked("peter_parker");
+        let emergency_owner = Addr::unchecked("miles_morales");
+        let info = mock_info(original_owner.as_ref(), &[]);
+        let owner = Owner::new("xyz");
+
+        let mut_deps = deps.as_mut();
+
+        owner
+            .initialize(
+                mut_deps.storage,
+                mut_deps.api,
+                OwnerInit::SetInitialOwner {
+                    owner: original_owner.to_string(),
+                },
+            )
+            .unwrap();
+
+        let current = owner.current(mut_deps.storage).unwrap();
+        assert_eq!(current, Some(original_owner.clone()));
+        assert!(owner.is_owner(mut_deps.storage, &original_owner).unwrap());
+
+        let em_owner = owner.emergency_owner(mut_deps.storage).unwrap();
+        assert_eq!(em_owner, None);
+        assert!(!owner
+            .is_emergency_owner(mut_deps.storage, &emergency_owner)
+            .unwrap());
+
+        let res = owner.query(mut_deps.storage).unwrap();
+        assert_eq!(
+            res,
+            OwnerResponse {
+                owner: Some(original_owner.to_string()),
+                proposed: None,
+                emergency_owner: None,
+                initialized: true,
+                abolished: false,
+            }
+        );
+
+        owner
+            .update::<Empty, Empty>(
+                mut_deps,
+                info,
+                SetEmergencyOwner {
+                    emergency_owner: emergency_owner.to_string(),
+                },
+            )
+            .unwrap();
+
+        let storage = deps.as_ref().storage;
+
+        let current = owner.current(storage).unwrap();
+        assert_eq!(current, Some(original_owner.clone()));
+        assert!(owner.is_owner(storage, &original_owner).unwrap());
+
+        let em_owner = owner.emergency_owner(storage).unwrap();
+        assert_eq!(em_owner, Some(emergency_owner.clone()));
+        assert!(owner.is_emergency_owner(storage, &emergency_owner).unwrap());
+
+        let state = owner.state(storage).unwrap();
+        match state {
+            OwnerState::B(_) => {}
+            _ => panic!("Should be in the OwnerSetNoneProposed state"),
+        }
+
+        let res = owner.query(storage).unwrap();
+        assert_eq!(
+            res,
+            OwnerResponse {
+                owner: Some(original_owner.to_string()),
+                proposed: None,
+                emergency_owner: Some(emergency_owner.to_string()),
+                initialized: true,
+                abolished: false,
+            }
+        );
+    }
+
+    #[test]
+    fn clear_emergency_owner() {
+        let mut deps = mock_dependencies();
+        let original_owner = Addr::unchecked("peter_parker");
+        let emergency_owner = Addr::unchecked("miles_morales");
+        let info = mock_info(original_owner.as_ref(), &[]);
+        let owner = Owner::new("xyz");
+
+        let mut_deps = deps.as_mut();
+
+        owner
+            .initialize(
+                mut_deps.storage,
+                mut_deps.api,
+                OwnerInit::SetInitialOwner {
+                    owner: original_owner.to_string(),
+                },
+            )
+            .unwrap();
+
+        owner
+            .update::<Empty, Empty>(
+                mut_deps,
+                info.clone(),
+                SetEmergencyOwner {
+                    emergency_owner: emergency_owner.to_string(),
+                },
+            )
+            .unwrap();
+
+        owner
+            .update::<Empty, Empty>(deps.as_mut(), info, ClearEmergencyOwner)
+            .unwrap();
+
+        let storage = deps.as_ref().storage;
+
+        let current = owner.current(storage).unwrap();
+        assert_eq!(current, Some(original_owner.clone()));
+        assert!(owner.is_owner(storage, &original_owner).unwrap());
+
+        let em_owner = owner.emergency_owner(storage).unwrap();
+        assert_eq!(em_owner, None);
+        assert!(!owner.is_emergency_owner(storage, &emergency_owner).unwrap());
+
+        let state = owner.state(storage).unwrap();
+        match state {
+            OwnerState::B(_) => {}
+            _ => panic!("Should be in the OwnerSetNoneProposed state"),
+        }
+
+        let res = owner.query(storage).unwrap();
+        assert_eq!(
+            res,
+            OwnerResponse {
+                owner: Some(original_owner.to_string()),
+                proposed: None,
+                emergency_owner: None,
+                initialized: true,
+                abolished: false,
             }
         );
     }
