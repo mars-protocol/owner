@@ -1,6 +1,6 @@
 [package]
 name        = "mars-owner"
-version     = "1.1.0"
+version     = "1.2.0"
 authors     = ["grod220 <gabe.r@delphilabs.io>", "Piotr Babel <piotr@delphilabs.io>"]
 description = "A package for managing owner role in cosmwasm contracts"
 license     = "GPL-3.0"
@@ -14,8 +14,8 @@ default = []
 emergency-owner = []
 
 [dependencies]
-cosmwasm-schema = "1.1.9"
-cosmwasm-std    = "1.1.9"
+cosmwasm-schema = "1.2.5"
+cosmwasm-std    = "1.2.5"
 cw-storage-plus = "1.0.1"
-schemars        = "0.8.11"
-thiserror       = "1.0.37"
+schemars        = "0.8.12"
+thiserror       = "1.0.40"
