@@ -45,7 +45,7 @@ type OwnerResult<T> = Result<T, OwnerError>;
 #[cw_serde]
 enum OwnerState {
     Uninitialized,
-    Std {
+    Base {
         owner: Addr,
         #[cfg(feature = "emergency-owner")]
         emergency_owner: Option<Addr>,
@@ -107,7 +107,7 @@ impl<'a> Owner<'a> {
     //--------------------------------------------------------------------------------------------------
     pub fn current(&self, storage: &'a dyn Storage) -> StdResult<Option<Addr>> {
         Ok(match self.state(storage)? {
-            OwnerState::Std { owner, .. } => Some(owner),
+            OwnerState::Base { owner, .. } => Some(owner),
             OwnerState::Proposed { owner, .. } => Some(owner),
             _ => None,
         })
@@ -137,7 +137,7 @@ impl<'a> Owner<'a> {
     #[cfg(feature = "emergency-owner")]
     pub fn emergency_owner(&self, storage: &'a dyn Storage) -> StdResult<Option<Addr>> {
         Ok(match self.state(storage)? {
-            OwnerState::Std {
+            OwnerState::Base {
                 emergency_owner, ..
             } => emergency_owner,
             OwnerState::Proposed {
@@ -182,7 +182,7 @@ impl<'a> Owner<'a> {
                 let new_state = match init_action {
                     OwnerInit::SetInitialOwner { owner } => {
                         let validated = api.addr_validate(&owner)?;
-                        OwnerState::Std {
+                        OwnerState::Base {
                             owner: validated,
                             #[cfg(feature = "emergency-owner")]
                             emergency_owner: None,
@@ -234,7 +234,7 @@ impl<'a> Owner<'a> {
 
         let new_state = match (state, event) {
             (
-                OwnerState::Std {
+                OwnerState::Base {
                     owner,
                     #[cfg(feature = "emergency-owner")]
                     emergency_owner,
@@ -252,23 +252,26 @@ impl<'a> Owner<'a> {
                 }
             }
             #[cfg(feature = "emergency-owner")]
-            (OwnerState::Std { owner, .. }, OwnerUpdate::SetEmergencyOwner { emergency_owner }) => {
+            (
+                OwnerState::Base { owner, .. },
+                OwnerUpdate::SetEmergencyOwner { emergency_owner },
+            ) => {
                 self.assert_owner(storage, sender)?;
                 let validated = api.addr_validate(&emergency_owner)?;
-                OwnerState::Std {
+                OwnerState::Base {
                     owner,
                     emergency_owner: Some(validated),
                 }
             }
             #[cfg(feature = "emergency-owner")]
-            (OwnerState::Std { owner, .. }, OwnerUpdate::ClearEmergencyOwner) => {
+            (OwnerState::Base { owner, .. }, OwnerUpdate::ClearEmergencyOwner) => {
                 self.assert_owner(storage, sender)?;
-                OwnerState::Std {
+                OwnerState::Base {
                     owner,
                     emergency_owner: None,
                 }
             }
-            (OwnerState::Std { .. }, OwnerUpdate::AbolishOwnerRole) => {
+            (OwnerState::Base { .. }, OwnerUpdate::AbolishOwnerRole) => {
                 self.assert_owner(storage, sender)?;
                 OwnerState::Abolished
             }
@@ -282,7 +285,7 @@ impl<'a> Owner<'a> {
                 OwnerUpdate::AcceptProposed,
             ) => {
                 self.assert_proposed(storage, sender)?;
-                OwnerState::Std {
+                OwnerState::Base {
                     owner: proposed,
                     #[cfg(feature = "emergency-owner")]
                     emergency_owner,
@@ -298,7 +301,7 @@ impl<'a> Owner<'a> {
                 OwnerUpdate::ClearProposed,
             ) => {
                 self.assert_owner(storage, sender)?;
-                OwnerState::Std {
+                OwnerState::Base {
                     owner,
                     #[cfg(feature = "emergency-owner")]
                     emergency_owner,
@@ -871,8 +874,8 @@ mod tests {
 
         let state = owner.state(mut_deps.storage).unwrap();
         match state {
-            OwnerState::Std { .. } => {}
-            _ => panic!("Should be in the Std state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let current = owner.current(mut_deps.storage).unwrap();
@@ -994,8 +997,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::Std { .. } => {}
-            _ => panic!("Should be in the Std state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let current = owner.current(storage).unwrap();
@@ -1060,8 +1063,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::Std { .. } => {}
-            _ => panic!("Should be in the Std state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let current = owner.current(storage).unwrap();
@@ -1204,8 +1207,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::Std { .. } => {}
-            _ => panic!("Should be in the Std state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let res = owner.query(storage).unwrap();
@@ -1268,8 +1271,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::Std { .. } => {}
-            _ => panic!("Should be in the Std state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let res = owner.query(storage).unwrap();
