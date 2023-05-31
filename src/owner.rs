@@ -44,91 +44,20 @@ type OwnerResult<T> = Result<T, OwnerError>;
 /// The finite states that are possible
 #[cw_serde]
 enum OwnerState {
-    A(OwnerUninitialized),
-    B(OwnerSetNoneProposed),
-    C(OwnerSetWithProposed),
-    D(OwnerRoleAbolished),
+    Uninitialized,
+    Base {
+        owner: Addr,
+        #[cfg(feature = "emergency-owner")]
+        emergency_owner: Option<Addr>,
+    },
+    Proposed {
+        owner: Addr,
+        proposed: Addr,
+        #[cfg(feature = "emergency-owner")]
+        emergency_owner: Option<Addr>,
+    },
+    Abolished,
 }
-
-#[cw_serde]
-struct OwnerUninitialized;
-
-impl OwnerUninitialized {
-    pub fn initialize(&self, owner: &Addr) -> OwnerState {
-        OwnerState::B(OwnerSetNoneProposed {
-            owner: owner.clone(),
-            #[cfg(feature = "emergency-owner")]
-            emergency_owner: None,
-        })
-    }
-
-    pub fn abolish_owner_role(&self) -> OwnerState {
-        OwnerState::D(OwnerRoleAbolished)
-    }
-}
-
-#[cw_serde]
-struct OwnerSetNoneProposed {
-    owner: Addr,
-    #[cfg(feature = "emergency-owner")]
-    emergency_owner: Option<Addr>,
-}
-
-impl OwnerSetNoneProposed {
-    pub fn propose(self, proposed: &Addr) -> OwnerState {
-        OwnerState::C(OwnerSetWithProposed {
-            owner: self.owner,
-            proposed: proposed.clone(),
-            #[cfg(feature = "emergency-owner")]
-            emergency_owner: self.emergency_owner,
-        })
-    }
-
-    pub fn abolish_owner_role(self) -> OwnerState {
-        OwnerState::D(OwnerRoleAbolished)
-    }
-
-    #[cfg(feature = "emergency-owner")]
-    pub fn set_emergency_owner(self, emergency_owner: Option<Addr>) -> OwnerState {
-        OwnerState::B(OwnerSetNoneProposed {
-            owner: self.owner,
-            emergency_owner,
-        })
-    }
-}
-
-#[cw_serde]
-struct OwnerSetWithProposed {
-    owner: Addr,
-    proposed: Addr,
-    #[cfg(feature = "emergency-owner")]
-    emergency_owner: Option<Addr>,
-}
-
-impl OwnerSetWithProposed {
-    pub fn clear_proposed(self) -> OwnerState {
-        OwnerState::B(OwnerSetNoneProposed {
-            owner: self.owner,
-            #[cfg(feature = "emergency-owner")]
-            emergency_owner: self.emergency_owner,
-        })
-    }
-
-    pub fn accept_proposed(self) -> OwnerState {
-        OwnerState::B(OwnerSetNoneProposed {
-            owner: self.proposed,
-            #[cfg(feature = "emergency-owner")]
-            emergency_owner: self.emergency_owner,
-        })
-    }
-
-    pub fn abolish_owner_role(self) -> OwnerState {
-        OwnerState::D(OwnerRoleAbolished)
-    }
-}
-
-#[cw_serde]
-struct OwnerRoleAbolished;
 
 #[cw_serde]
 pub enum OwnerUpdate {
@@ -158,39 +87,7 @@ pub enum OwnerInit {
 
 /// A struct designed to help facilitate a two-step transition between contract owners safely.
 /// It implements a finite state machine with dispatched events to manage state transitions.
-/// State A: OwnerUninitialized
-///     - No restrictions on who can initialize the owner role
-/// State B: OwnerSetNoneProposed
-///     - Once owner is set. Only they can execute the following updates:
-///       - ProposeNewOwner
-///       - ClearProposed
-///       - SetEmergencyOwner
-///       - ClearEmergencyOwner
-/// State C: OwnerSetWithProposed
-///     - Only the proposed new owner can accept the new role via AcceptProposed {}
-///     - The current owner can also clear the proposed new owner via ClearProposed {}
-///
-/// In every state, the owner (or on init, the initializer) can choose to abandon the role
-/// and make the config immutable.
-///
-///```text
-///                                                                  Clear Proposed
-///                                                    +-------------------------------------^
-///                                                    |                                     |
-///                                                    v                                     |
-/// +----------------+                      +----------------+                       +-------+--------+
-/// | Owner: None    |   Initialize Owner   | Owner: Gabe    |   Propose New Owner   | Owner: Gabe    |
-/// | Proposed: None +--------------------->| Proposed: None +---------------------->| Proposed: Joy  |
-/// +-----+----------+                      ++---------------+                       +-------+----+---+
-///       |                                  | Owner: Joy                                    |    |
-///       |                                  | Proposed: None                                |    |
-///   Abolish Role                           |      ^                                        |    |
-///       |                *immutable        |      |              Accept Proposed           |    |
-///       |            +----------------+    |      <----------------------------------------+    |
-///       +----------->| Owner: None    |    |                                                    |
-///                    | Proposed: None +<---+------------------ Abolish Role --------------------+
-///                    +----------------+
-/// ```
+/// State machine visualization: https://stately.ai/registry/editor/b7e5dbac-2d33-47f7-a84b-e38dff5694ad?machineId=f8d99cd1-dd55-4506-961b-e2542480be68&mode=Simulate
 pub struct Owner<'a>(Item<'a, OwnerState>);
 
 impl<'a> Owner<'a> {
@@ -202,7 +99,7 @@ impl<'a> Owner<'a> {
         Ok(self
             .0
             .may_load(storage)?
-            .unwrap_or(OwnerState::A(OwnerUninitialized)))
+            .unwrap_or(OwnerState::Uninitialized))
     }
 
     //--------------------------------------------------------------------------------------------------
@@ -210,29 +107,29 @@ impl<'a> Owner<'a> {
     //--------------------------------------------------------------------------------------------------
     pub fn current(&self, storage: &'a dyn Storage) -> StdResult<Option<Addr>> {
         Ok(match self.state(storage)? {
-            OwnerState::B(b) => Some(b.owner),
-            OwnerState::C(c) => Some(c.owner),
+            OwnerState::Base { owner, .. } => Some(owner),
+            OwnerState::Proposed { owner, .. } => Some(owner),
             _ => None,
         })
     }
 
     pub fn is_owner(&self, storage: &'a dyn Storage, addr: &Addr) -> StdResult<bool> {
         match self.current(storage)? {
-            Some(owner) if &owner == addr => Ok(true),
+            Some(owner) if owner == addr => Ok(true),
             _ => Ok(false),
         }
     }
 
     pub fn proposed(&self, storage: &'a dyn Storage) -> StdResult<Option<Addr>> {
         Ok(match self.state(storage)? {
-            OwnerState::C(c) => Some(c.proposed),
+            OwnerState::Proposed { proposed, .. } => Some(proposed),
             _ => None,
         })
     }
 
     pub fn is_proposed(&self, storage: &'a dyn Storage, addr: &Addr) -> StdResult<bool> {
         match self.proposed(storage)? {
-            Some(proposed) if &proposed == addr => Ok(true),
+            Some(proposed) if proposed == addr => Ok(true),
             _ => Ok(false),
         }
     }
@@ -240,8 +137,12 @@ impl<'a> Owner<'a> {
     #[cfg(feature = "emergency-owner")]
     pub fn emergency_owner(&self, storage: &'a dyn Storage) -> StdResult<Option<Addr>> {
         Ok(match self.state(storage)? {
-            OwnerState::B(c) => c.emergency_owner,
-            OwnerState::C(c) => c.emergency_owner,
+            OwnerState::Base {
+                emergency_owner, ..
+            } => emergency_owner,
+            OwnerState::Proposed {
+                emergency_owner, ..
+            } => emergency_owner,
             _ => None,
         })
     }
@@ -249,7 +150,7 @@ impl<'a> Owner<'a> {
     #[cfg(feature = "emergency-owner")]
     pub fn is_emergency_owner(&self, storage: &'a dyn Storage, addr: &Addr) -> StdResult<bool> {
         match self.emergency_owner(storage)? {
-            Some(em_owner) if &em_owner == addr => Ok(true),
+            Some(em_owner) if em_owner == addr => Ok(true),
             _ => Ok(false),
         }
     }
@@ -258,8 +159,8 @@ impl<'a> Owner<'a> {
         Ok(OwnerResponse {
             owner: self.current(storage)?.map(Into::into),
             proposed: self.proposed(storage)?.map(Into::into),
-            initialized: !matches!(self.state(storage)?, OwnerState::A(OwnerUninitialized)),
-            abolished: matches!(self.state(storage)?, OwnerState::D(OwnerRoleAbolished)),
+            initialized: !matches!(self.state(storage)?, OwnerState::Uninitialized),
+            abolished: matches!(self.state(storage)?, OwnerState::Abolished),
             #[cfg(feature = "emergency-owner")]
             emergency_owner: self.emergency_owner(storage)?.map(Into::into),
         })
@@ -277,13 +178,17 @@ impl<'a> Owner<'a> {
     ) -> OwnerResult<()> {
         let initial_state = self.state(storage)?;
         match initial_state {
-            OwnerState::A(a) => {
+            OwnerState::Uninitialized => {
                 let new_state = match init_action {
                     OwnerInit::SetInitialOwner { owner } => {
                         let validated = api.addr_validate(&owner)?;
-                        a.initialize(&validated)
+                        OwnerState::Base {
+                            owner: validated,
+                            #[cfg(feature = "emergency-owner")]
+                            emergency_owner: None,
+                        }
                     }
-                    OwnerInit::AbolishOwnerRole => a.abolish_owner_role(),
+                    OwnerInit::AbolishOwnerRole => OwnerState::Abolished,
                 };
                 self.0.save(storage, &new_state)?;
                 Ok(())
@@ -328,37 +233,79 @@ impl<'a> Owner<'a> {
         let state = self.state(storage)?;
 
         let new_state = match (state, event) {
-            (OwnerState::B(b), OwnerUpdate::ProposeNewOwner { proposed }) => {
+            (
+                OwnerState::Base {
+                    owner,
+                    #[cfg(feature = "emergency-owner")]
+                    emergency_owner,
+                    ..
+                },
+                OwnerUpdate::ProposeNewOwner { proposed },
+            ) => {
                 self.assert_owner(storage, sender)?;
                 let validated = api.addr_validate(&proposed)?;
-                b.propose(&validated)
+                OwnerState::Proposed {
+                    owner,
+                    proposed: validated,
+                    #[cfg(feature = "emergency-owner")]
+                    emergency_owner,
+                }
             }
             #[cfg(feature = "emergency-owner")]
-            (OwnerState::B(b), OwnerUpdate::SetEmergencyOwner { emergency_owner }) => {
+            (
+                OwnerState::Base { owner, .. },
+                OwnerUpdate::SetEmergencyOwner { emergency_owner },
+            ) => {
                 self.assert_owner(storage, sender)?;
                 let validated = api.addr_validate(&emergency_owner)?;
-                b.set_emergency_owner(Some(validated))
+                OwnerState::Base {
+                    owner,
+                    emergency_owner: Some(validated),
+                }
             }
             #[cfg(feature = "emergency-owner")]
-            (OwnerState::B(b), OwnerUpdate::ClearEmergencyOwner) => {
+            (OwnerState::Base { owner, .. }, OwnerUpdate::ClearEmergencyOwner) => {
                 self.assert_owner(storage, sender)?;
-                b.set_emergency_owner(None)
+                OwnerState::Base {
+                    owner,
+                    emergency_owner: None,
+                }
             }
-            (OwnerState::B(b), OwnerUpdate::AbolishOwnerRole) => {
+            (OwnerState::Base { .. }, OwnerUpdate::AbolishOwnerRole) => {
                 self.assert_owner(storage, sender)?;
-                b.abolish_owner_role()
+                OwnerState::Abolished
             }
-            (OwnerState::C(c), OwnerUpdate::AcceptProposed) => {
+            (
+                OwnerState::Proposed {
+                    proposed,
+                    #[cfg(feature = "emergency-owner")]
+                    emergency_owner,
+                    ..
+                },
+                OwnerUpdate::AcceptProposed,
+            ) => {
                 self.assert_proposed(storage, sender)?;
-                c.accept_proposed()
+                OwnerState::Base {
+                    owner: proposed,
+                    #[cfg(feature = "emergency-owner")]
+                    emergency_owner,
+                }
             }
-            (OwnerState::C(c), OwnerUpdate::ClearProposed) => {
+            (
+                OwnerState::Proposed {
+                    owner,
+                    #[cfg(feature = "emergency-owner")]
+                    emergency_owner,
+                    ..
+                },
+                OwnerUpdate::ClearProposed,
+            ) => {
                 self.assert_owner(storage, sender)?;
-                c.clear_proposed()
-            }
-            (OwnerState::C(c), OwnerUpdate::AbolishOwnerRole) => {
-                self.assert_owner(storage, sender)?;
-                c.abolish_owner_role()
+                OwnerState::Base {
+                    owner,
+                    #[cfg(feature = "emergency-owner")]
+                    emergency_owner,
+                }
             }
             (_, _) => return Err(OwnerError::StateTransitionError {}),
         };
@@ -877,8 +824,8 @@ mod tests {
     fn assert_uninitialized(storage: &dyn Storage, owner: &Owner) {
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::A(_) => {}
-            _ => panic!("Should be in the OwnerUninitialized state"),
+            OwnerState::Uninitialized => {}
+            _ => panic!("Should be in the Uninitialized state"),
         }
 
         let current = owner.current(storage).unwrap();
@@ -927,8 +874,8 @@ mod tests {
 
         let state = owner.state(mut_deps.storage).unwrap();
         match state {
-            OwnerState::B(_) => {}
-            _ => panic!("Should be in the OwnerSetNoneProposed state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let current = owner.current(mut_deps.storage).unwrap();
@@ -985,8 +932,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::C(_) => {}
-            _ => panic!("Should be in the OwnerSetWithProposed state"),
+            OwnerState::Proposed { .. } => {}
+            _ => panic!("Should be in the Proposed state"),
         }
 
         let current = owner.current(storage).unwrap();
@@ -1050,8 +997,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::B(_) => {}
-            _ => panic!("Should be in the OwnerSetNoneProposed state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let current = owner.current(storage).unwrap();
@@ -1116,8 +1063,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::B(_) => {}
-            _ => panic!("Should be in the OwnerSetNoneProposed state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let current = owner.current(storage).unwrap();
@@ -1169,8 +1116,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::D(_) => {}
-            _ => panic!("Should be in the OwnerRoleAbolished state"),
+            OwnerState::Abolished => {}
+            _ => panic!("Should be in the Abolished state"),
         }
 
         let current = owner.current(storage).unwrap();
@@ -1260,8 +1207,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::B(_) => {}
-            _ => panic!("Should be in the OwnerSetNoneProposed state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let res = owner.query(storage).unwrap();
@@ -1324,8 +1271,8 @@ mod tests {
 
         let state = owner.state(storage).unwrap();
         match state {
-            OwnerState::B(_) => {}
-            _ => panic!("Should be in the OwnerSetNoneProposed state"),
+            OwnerState::Base { .. } => {}
+            _ => panic!("Should be in the Base state"),
         }
 
         let res = owner.query(storage).unwrap();
